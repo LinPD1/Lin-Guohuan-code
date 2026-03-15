@@ -1,4 +1,5 @@
 import time
+
 #拓扑连接表
 MY_TOPOLOGY = {
     'R1': ['R2', 'R3', 'R4'],      #R1连R2、R3、R4
@@ -24,6 +25,7 @@ class Packet:
 
 #路由器类
 class Router:
+    PROCESS_DELAY = 0.01  # 每个包处理需要0.01秒
     def __init__(self, name):
         self.name = name  # 路由器名称
         self.queue = []  # 路由器数据包队列
@@ -33,7 +35,7 @@ class Router:
         packet.path.append(self.name)  # 将当前的路由器的名字加入数据包path中，记录经过的路由器
         self.queue.append(packet)  #将包放入队列末尾
         # 输出接收包的提示，获取接收数据包后的路由器队列长度
-        print(f" {self.name} 收到包{packet.id}, 队列长度={len(self.queue)}")
+        print(f"{self.name} 收到包{packet.id}, 队列长度={len(self.queue)}")
 
     #数据包入队函数（发送）
     def send(self):
@@ -42,9 +44,43 @@ class Router:
             # 从队列头部取出一个包，发送给下一跳
             packet = self.queue.pop(0)
             # 输出接收包的提示，获取发送数据包后路由器的当前队列长度
-            print(f"  {self.name} 发出包{packet.id}, 队列长度={len(self.queue)}")
+            time.sleep(self.PROCESS_DELAY)#数据包的处理时间
+            print(f"{self.name} 发出包{packet.id}, 队列长度={len(self.queue)}")
             return packet
         return None
 
+# ==================== 主程序 ====================
+print("="*50)
+print("固定路径传输测试")
+
+print("创建路由器:")# 创建所有路由器
+routers = {}
+for name in MY_TOPOLOGY.keys():
+    routers[name] = Router(name)
+    print(f"{name}")
+
+path = ['R1', 'R3', 'R6', 'R9', 'R11']# 先固定路径
+print(f"固定路径: {' → '.join(path)}")
+
+packet = Packet(1, 'R1', 'R11')# 创建测试的数据包
+print(f"创建了数据包{packet.id}")
+
+print(f"开始转发...")
+
+for router_name in path:  # 遍历路径上的每个路由器
+    router = routers[router_name]
+    router.receive(packet)
+    if router_name != 'R11':  # 不是目的路由器就转发
+        router.send()
+
+print("="*50)
+print("结果")
+
+end_time = time.time()
+total_time = end_time - packet.create_time #计算从创建到到达目的地的总传输时间
+
+print(f"总时间: {total_time:.4f} 秒") #显示总时间
+print(f"路径: {' → '.join(packet.path)}") #显示路径
+print(f"经过 {len(packet.path)-1} 跳") #显示几跳
 
 
