@@ -1,86 +1,411 @@
 import time
+import networkx as nx  # 建图、迪杰斯特拉算最短路径
+import random  # 随机加背景包和选路由器
+import sys  # 用exit退出程序
+import msvcrt  # 导入 Windows 专用的键盘监听库
+from geopy.distance import geodesic  # 导入地理距离计算库
 
-#拓扑连接表
+# 拓扑连接表
 MY_TOPOLOGY = {
-    'R1': ['R2', 'R3', 'R4'],      #R1连R2、R3、R4
-    'R2': ['R1', 'R3', 'R5'],      #R2连R1、R3、R5
-    'R3': ['R1', 'R2', 'R4', 'R6'],#剩余的以此类推！
-    'R4': ['R1', 'R3', 'R7'],
-    'R5': ['R2', 'R6', 'R8'],
-    'R6': ['R3', 'R5', 'R7', 'R9'],
-    'R7': ['R4', 'R6', 'R10'],
-    'R8': ['R5', 'R9', 'R11'],
-    'R9': ['R6', 'R8', 'R10', 'R11'],
-    'R10': ['R7', 'R9', 'R11'],
-    'R11': ['R8', 'R9', 'R10']
+    'R1': ['R2', 'R3', 'R4'],  # 深圳
+    'R2': ['R1', 'R3', 'R5'],  # 广州
+    'R3': ['R1', 'R2', 'R4', 'R6'],  # 武汉
+    'R4': ['R1', 'R3', 'R7'],  # 长沙
+    'R5': ['R2', 'R6', 'R8'],  # 南昌
+    'R6': ['R3', 'R5', 'R9', 'R11'],  # 上海
+    'R7': ['R4', 'R10'],  # 福州
+    'R8': ['R5', 'R9', 'R11'],  # 合肥
+    'R9': ['R6', 'R8', 'R10', 'R11'],  # 南京
+    'R10': ['R7', 'R9', 'R11'],  # 宁波
+    'R11': ['R6', 'R8', 'R9', 'R10']  # 杭州
 }
-#数据包类
+
+# 城市坐标字典 (经度, 纬度)
+CITY_COORDS = {
+    '深圳': (114.06, 22.54),  # 起点R1深圳
+    '广州': (113.26, 23.13),
+    '武汉': (114.31, 30.59),
+    '长沙': (113.00, 28.21),
+    '南昌': (115.89, 28.68),
+    '上海': (121.47, 31.23),
+    '福州': (119.30, 26.08),
+    '合肥': (117.23, 31.82),
+    '南京': (118.80, 32.06),
+    '宁波': (121.54, 29.87),
+    '杭州': (120.15, 30.28)  # 终点R11杭州
+}
+
+# 路由器的对应城市
+ROUTER_TO_CITY = {
+    'R1': '深圳', 'R2': '广州', 'R3': '武汉',
+    'R4': '长沙', 'R5': '南昌', 'R6': '上海',
+    'R7': '福州', 'R8': '合肥', 'R9': '南京',
+    'R10': '宁波', 'R11': '杭州'
+}
+
+Send_speed = 125_000_000  # 千兆发送速度
+Update_interval = 10  # 随机加数据包和选路间隔时间统一为：10秒
+Real_packet_count = 1  # 每次选路后发送的机械臂数据包数量
+REFERENCE_PACKET_SIZE = 82  # 单位是字节，用于 Dijkstra 选路时的基准发送时延
+REFERENCE_SEND_DELAY = (REFERENCE_PACKET_SIZE * 8) / Send_speed
+
+
+# 数据包类
 class Packet:
-    def __init__(self, packet_id, source, destination):
-        self.id = packet_id    #数据包的编号
-        self.source = source   #数据包的起点（先固定为R1）
-        self.destination = destination  #数据包的终点（先固定为R11）
-        self.create_time = time.time()  #记录包创建的时间（秒），后面用于计算传输时间！
+    def __init__(self, packet_id, data_bits, source='R1', destination='R11'):
+        self.id = packet_id  # 数据包的编号
+        self.source = source  # 数据包的起点（固定为R1）
+        self.destination = destination  # 数据包的终点（固定为R11）
         self.path = []  # 记录数据包经过的路由器，初始为空列表
 
+        self.data_bits = data_bits  # 数据部分（bit），外部传入
+        self.data_bytes = data_bits / 8  # 转为字节
+        udp_header = 8
+        ip_header = 20
+        ethernet_header = 14
+        headers_total = udp_header + ip_header + ethernet_header
+        raw_size = headers_total + self.data_bytes
+        MIN_FRAME = 64  # 最小帧长
+        MAX_FRAME = 1518  # MTU
+
+        if raw_size < MIN_FRAME:
+            self.total_bytes = MIN_FRAME
+        elif raw_size > MAX_FRAME:
+            self.total_bytes = MAX_FRAME
+        else:
+            self.total_bytes = raw_size
+        self.send_delay = (self.total_bytes * 8) / Send_speed
 #路由器类
 class Router:
-    PROCESS_DELAY = 0.01  # 每个包处理需要0.01秒
     def __init__(self, name):
-        self.name = name  # 路由器名称
-        self.queue = []  # 路由器数据包队列
+        self.name = name # 路由器名称
+        self.queue = []  # 机械臂数据包的队列（背景包不入队）
+        self.bg_total_bytes = 0  # 背景包总字节数
+        self.is_fault = False  # 路由器是否故障的标志
+        city = ROUTER_TO_CITY[name]  #  路由器所在城市
+        lon, lat = CITY_COORDS[city]  # 获取经纬度
+        self.lon = lon  # 经度
+        self.lat = lat  # 纬度
 
-    #数据包入队函数（接收）
+
+
+    def get_queue_delay(self):
+        """排队时延 = 背景包总比特数 / 带宽
+        背景包不入队，仅用于模拟路由器拥塞"""
+        bandwidth = Send_speed  # 125_000_000 bps
+        return (self.bg_total_bytes * 8) / bandwidth
+
+    def add_background_packets(self, count,size):
+        """根据随机数（5-10）添加随机大小（64-1518字节）背景包，只增加计数，不入队"""
+        self.bg_total_bytes += count * size
+
+    def clear_background_packets(self):
+        """清空背景包"""
+        self.bg_total_bytes = 0
+
+    def clear_real_queue(self):
+        """清空机械臂数据包队列"""
+        self.queue.clear()
+
     def receive(self, packet):
-        packet.path.append(self.name)  # 将当前的路由器的名字加入数据包path中，记录经过的路由器
-        self.queue.append(packet)  #将包放入队列末尾
-        # 输出接收包的提示，获取接收数据包后的路由器队列长度
-        print(f"{self.name} 收到包{packet.id}, 队列长度={len(self.queue)}")
+        """机械臂数据包入队函数（接收）"""
+        if self.is_fault:
+            print(f"{self.name} 故障，丢包{packet.id}")
+            return False
 
-    #数据包入队函数（发送）
-    def send(self):
-        #先要检查队列有没有数据包，没有则返回None
+        packet.path.append(self.name)
+        self.queue.append(packet)  # 机械臂数据包入队
+        print(f"{self.name} 收到包{packet.id}, 队列长度={len(self.queue)}")
+        return True  # 返回True表示数据包成功接收
+
+    def send(self, packet):
+        """数据包出队函数（发送）"""
+        if self.is_fault:
+            return False
+
         if self.queue:
-            # 从队列头部取出一个包，发送给下一跳
-            packet = self.queue.pop(0)
-            # 输出接收包的提示，获取发送数据包后路由器的当前队列长度
-            time.sleep(self.PROCESS_DELAY)#数据包的处理时间
+            self.queue.pop(0)
             print(f"{self.name} 发出包{packet.id}, 队列长度={len(self.queue)}")
-            return packet
-        return None
+            return True
+        return False  # 队列无数据包，则返回False
+
+    def set_fault(self, fault=True):
+        """设置路由器故障"""
+        self.is_fault = fault
+        if fault:
+            self.queue.clear()  # 路由器故障时清空队列
+            print(f"  {self.name} 故障")
+        else:
+            print(f"  {self.name} 恢复")
+
+# 计算两台路由器之间传播时延
+def get_propagation_delay(routerA, routerB):
+    """
+    计算两个路由器之间的传播时延（秒）
+    使用 geopy 计算真实地理距离
+    """
+    # geopy 需要 (纬度, 经度)
+    coord_A = (routerA.lat, routerA.lon)
+    coord_B = (routerB.lat, routerB.lon)
+
+    distance_km = geodesic(coord_A, coord_B).kilometers
+    light_speed = 200000  # 单位km/s 光纤传播速度：2×10的8次方m/s
+    return distance_km / light_speed
+
+# 迪杰斯特拉算法选路（时延最少的路径）：
+"""
+1.根据当前背景包情况，计算每条链路的“综合时延”
+2.把排队、发送、传播时延全部折算到“该结点到邻居的链路权重”
+3.用 Dijkstra 找一条“总时延最小”的路径
+4.下一轮全部重算，实现“动态避障”
+"""
+def find_best_path(topology, routers, start='R1', end='R11'):
+    G = nx.Graph()  # 创建一个空的无向图G
+
+    for node, neighbors in topology.items():  # 遍历拓扑字典，node 表示路由器，neighbors 表示邻居列表
+        if routers[node].is_fault:  # 如果当前路由器节点的故障标志是True，则跳过
+            continue
+        for n in neighbors:  # 遍历当前路由器的每一个邻居，如果邻居是邻居路由器故障，则与它无边
+            if routers[n].is_fault:
+                continue
+            if not G.has_edge(node, n):  # 如果没有当前节点到某个邻居的边，则加边。防止重复加边，如： (R1,R2)和(R2,R1)是同一条边
+                queue_delay = routers[node].get_queue_delay()  # 当前路由器的排队时延
+                send_delay = REFERENCE_SEND_DELAY  # 发送时延（固定值）
+                prop_delay = get_propagation_delay(routers[node], routers[n])
+
+                weight = queue_delay + send_delay + prop_delay  # 把路由器排队、发送、传播时延，全部折算到出链路的时延上
+                G.add_edge(node, n, weight=weight)  # 将这条边加入图中
+
+    try:
+        path = nx.dijkstra_path(G, start, end, weight='weight')  # 尝试找R1到R11的时延最小的路径
+        total_delay = nx.dijkstra_path_length(G, start, end, weight='weight')  # 计算这条从R1到R11的路径的边的权重（总时延）
+        return path, total_delay  # 返回选出的时延最小路径和该路径总时延
+    except:
+        return None, None
+
+
+def clear_all_real_queues(routers):
+    """清空所有路由器的机械臂数据队列"""
+    for r in routers.values():  # 遍历所有路由器对象
+        r.clear_real_queue()
+    print(f"  已清空所有路由器的机械臂数据队列!")
+
+
+def add_random_background_traffic(routers):
+    """清空所有路由器的背景包"""
+    for n in routers.values():  # 遍历所有路由器对象
+        n.clear_background_packets()
+
+    """随机选择5台路由器（从11台中选5台，排除R11）"""
+    no_fault_routers = []  # 存放非故障且不是R11的路由器
+    for name in routers.keys():
+        if not routers[name].is_fault and name != 'R11':
+            no_fault_routers.append(name)
+
+    selected_routers = random.sample(no_fault_routers, 5)  # 随机抽取5个不重复的路由器
+    """给选中的路由器添加随机数量的背景包"""
+    print(f"\n 随机给路由器加入5-10个背景包:")
+    for r in selected_routers:
+        num_packets = random.randint(5, 10)
+        packet_size = random.randint(64, 1518)
+        routers[r].add_background_packets(num_packets, packet_size)
+        queue_delay = routers[r].get_queue_delay()
+        city_name = ROUTER_TO_CITY[r]
+        print(f"   ∆ {r}({city_name}) 新增 {num_packets} 个包(大小:{packet_size}B)，排队时延={queue_delay * 1000:.4f}ms")
+
+
+def calculate_path_queue_delay(path, routers):
+    """计算路径上所有路由器排队时延之和"""
+    total_queue_delay = 0
+    for router_name in path[0:-1]:  # 遍历路径中除最后一个路由器外的所有路由器
+        total_queue_delay += routers[router_name].get_queue_delay()  # 将路径上路由器的排队时延加在一起
+    return total_queue_delay
+
+
+def send_real_packets(path, routers, data_bits, packet_count=Real_packet_count):
+    """沿指定路径连续发送机械臂数据包
+    机械臂数据包的时延 = 发送时延 + 传播时延 + 当前路径的排队时延"""
+
+    print(f"\n 开始发送机械臂数据包（共{packet_count}个）")
+    city_path = [f"{r}({ROUTER_TO_CITY[r]})" for r in path]
+    print(f"   路径: {' → '.join(city_path)}")
+
+    # 计算当前路径的排队时延
+    current_queue_delay = calculate_path_queue_delay(path, routers)
+    total_prop_delay = 0
+    for i in range(len(path) - 1):
+        prop_delay = get_propagation_delay(routers[path[i]], routers[path[i + 1]])
+        total_prop_delay += prop_delay
+    print(f"   当前路径排队时延: {current_queue_delay * 1000:.4f} ms")
+    print(f"   当前路径传播时延: {total_prop_delay * 1000:.4f} ms")
+
+    # 沿路径转发
+    for i in range(packet_count):
+        # 为每个包创建新的Packet对象
+        real_packet = Packet(
+            packet_id=i + 1,
+            source='R1',
+            destination='R11',
+            data_bits=data_bits
+        )
+
+        if i == 0:  # 只在第一个包时显示信息
+            print(f"   数据包信息：数据部分 {data_bits} bit，总帧长 {real_packet.total_bytes} 字节")
+
+        success = True
+        for router_name in path:
+            router = routers[router_name]
+            if router.receive(real_packet) == False:
+                success = False
+                break
+            if router_name != 'R11':
+                if router.send(real_packet) == False:
+                    success = False
+                    break
+
+        if success:
+            hop_count = len(path) - 1
+            base_delay = hop_count * real_packet.send_delay
+            total_time = base_delay + current_queue_delay + total_prop_delay
+
+            city_path = [f"{r}({ROUTER_TO_CITY[r]})" for r in real_packet.path]
+            print(f"\n   包{i + 1}: 路径: {' → '.join(city_path)}")
+            print(f"           总时延: {total_time * 1000:.4f} ms")
+            print(
+                f"           (发送: {base_delay * 1000:.4f} ms + 排队: {current_queue_delay * 1000:.4f} ms + 传播: {total_prop_delay * 1000:.4f} ms)")
+        else:
+            print(f"\n   包{i + 1} 发送失败（路径中有故障路由器）")
+            break  # 一旦失败就停止
+
+def print_fault_status(routers):  # 输出当前设置故障的路由器有哪些
+    faulty = []  # 存故障路由器名字的列表
+    for router_name, r in routers.items():
+        if r.is_fault:
+            faulty.append(router_name)  # 如果该路由器是故障状态，则加入列表。
+    if faulty:
+        print(f" ️ 当前故障路由器: {faulty}")
+    else:
+        print(f" ️ 当前无故障路由器！")
+
+
+# 执行一轮完整的操作
+def run_one_round(routers, round):
+    """执行一轮操作：清空队列 → 加背景包 → 选路 → 发包"""
+    print(f"               第 {round} 轮 (t={round * Update_interval}秒)")
+    print(f"{'=' * 50}")
+
+    clear_all_real_queues(routers)  # 清空所有机械臂数据包队列
+
+    add_random_background_traffic(routers)  # 随机加包
+
+    best_path, total_delay = find_best_path(MY_TOPOLOGY, routers)   # 计算最优路径
+
+    if best_path:  # 有最佳路径则输出
+        print(f"\n  第{round}次选路结果:")
+        city_path = [f"{r}({ROUTER_TO_CITY[r]})" for r in best_path]
+        print(f"   最优路径: {' → '.join(city_path)}")
+        print(f"   路径总时延: {total_delay * 1000:.4f} ms")
+
+        try:
+            data_input_str = input("\n 请输入机械臂数据包的数据部分大小（单位：bit）：")
+            data_bits = int(data_input_str)  # 转为整数
+            if data_bits <= 0:
+                print("    输入无效，使用默认值 320 bit")
+                data_bits = 320
+        except ValueError:
+            print("    输入格式错误，使用默认值 320 bit")
+            data_bits = 320
+        # 发送机械臂数据包
+        send_real_packets(best_path, routers, data_bits, packet_count=Real_packet_count)
+    else:
+        print(f"\n第{round}次选路: 无可用路径！")
 
 # ==================== 主程序 ====================
-print("="*50)
-print("固定路径传输测试")
+if __name__ == "__main__":
+    print("ISIS骨干网仿真 - Dijkstra自动选路 + 动态拥塞模拟")
+    print("=" * 50)
 
-print("创建路由器:")# 创建所有路由器
-routers = {}
-for name in MY_TOPOLOGY.keys():
-    routers[name] = Router(name)
-    print(f"{name}")
+    print(f"路径动态更新间隔: {Update_interval} 秒")
 
-path = ['R1', 'R3', 'R6', 'R9', 'R11']# 先固定路径
-print(f"固定路径: {' → '.join(path)}")
-
-packet = Packet(1, 'R1', 'R11')# 创建测试的数据包
-print(f"创建了数据包{packet.id}")
-
-print(f"开始转发...")
-
-for router_name in path:  # 遍历路径上的每个路由器
-    router = routers[router_name]
-    router.receive(packet)
-    if router_name != 'R11':  # 不是目的路由器就转发
-        router.send()
-
-print("="*50)
-print("结果")
-
-end_time = time.time()
-total_time = end_time - packet.create_time #计算从创建到到达目的地的总传输时间
-
-print(f"总时间: {total_time:.4f} 秒") #显示总时间
-print(f"路径: {' → '.join(packet.path)}") #显示路径
-print(f"经过 {len(packet.path)-1} 跳") #显示几跳
+    # 创建所有路由器并输出提示
+    print("\n创建路由器:")
+    routers = {}
+    for name in MY_TOPOLOGY.keys():
+        routers[name] = Router(name)  # 路由器名称为键，将其创建的路由器对象加入routers字典
+    print("   R1 - R11 路由器创建完成！")
 
 
+    print("\n" + "=" * 50)
+    print("可用命令:")
+    print("  fault <路由器名>   - 设置路由器故障（如:fault R6）")
+    print("  recover <路由器名> - 恢复路由器（如:recover R6）")
+    print("  status           - 查看当前状态")
+    print("  exit             - 退出程序")
+    print("=" * 50)
+
+    round = 1
+    print(f"开始仿真循环...")
+
+    while True:
+        # 执行一轮完整操作
+        run_one_round(routers, round)
+
+        # 等待10秒，期间可以输入命令
+        print(f"\n  等待 {Update_interval} 秒... (可输入命令: fault <路由器名> / recover <路由器名> / status / exit)")
+
+        start_wait = time.time()
+        input_buffer = ""  # 暂存用户输入的字符
+        need_restart_round = False
+
+        while time.time() - start_wait < Update_interval:  # 在下一轮选路的间隔可以输入命令
+
+            if msvcrt.kbhit():  # 判断键盘有没有被按下
+
+                char = msvcrt.getch().decode('ascii')  # 按下的键转换为字符串
+                if char == '\r':  # 输入回车键则代表输入完成，
+                    cmd = input_buffer.strip().lower()
+                    input_buffer = ""
+
+                    if cmd:
+                        if cmd.startswith('fault '):  # 判断字符串是否'fault '开头
+                            router_name = cmd[6:].upper()  # 是的话则读取从第6位往后的字符，并改为大写
+
+                            if router_name in routers:  # 若读取的字符存在
+                                routers[router_name].set_fault(True)  # 给对应路由器设置故障
+                                print_fault_status(routers)  # 输入目前故障状态
+                                need_restart_round = True  # 设置故障后立即重新执行一轮
+                                break
+                            else:
+                                print(f"   路由器 {router_name} 不存在")
+
+                        elif cmd.startswith('recover '):  # 判断字符串是否'recover '开头
+                            router_name = cmd[8:].upper()
+                            if router_name in routers:
+                                routers[router_name].set_fault(False)  # 给对应路由器取消故障设定
+                                print_fault_status(routers)
+                                print(f"      {router_name}恢复操作已完成，将在下一轮自动重新选路!")
+                            else:
+                                print(f"   路由器 {router_name} 不存在")
+
+                        elif cmd == 'status':  # 判断字符串是status
+                            print_fault_status(routers)
+                            print(f"   当前轮次: 第{round}次")
+
+                        elif cmd == 'exit':  # 判断字符串是exit，是则退出程序
+                            print("\n  程序已停止")
+                            sys.exit(0)
+
+                        else:
+                            print(f"   未知命令: {cmd}")
+                    print(f"\n  继续等待... (剩余 {Update_interval - (time.time() - start_wait):.1f} 秒)")
+
+                else:
+                    input_buffer += char  # 没输入回车则先放到input_buffer这个字符串中
+
+            time.sleep(0.1)  # 每0.1秒判断是否有输入
+        if need_restart_round:  # 如果故障触发了重新选路，则不增加round
+            print(f"\n  故障触发，立即重新选路...")
+            continue
+
+        round += 1
+        print("-" * 50)
