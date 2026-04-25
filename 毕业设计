@@ -43,10 +43,10 @@ ROUTER_TO_CITY = {
     'R10': '宁波', 'R11': '杭州'
 }
 
-Send_speed = 125_000_000  # 千兆发送速度
+Send_speed = 1_000_000_000 # 1 Gbps 千兆带宽
 Update_interval = 10  # 随机加数据包和选路间隔时间统一为：10秒
 Real_packet_count = 1  # 每次选路后发送的机械臂数据包数量
-REFERENCE_PACKET_SIZE = 82  # 单位是字节，用于 Dijkstra 选路时的基准发送时延
+REFERENCE_PACKET_SIZE = 82  # 单位是字节，用于 Dijkstra 选路时的算基准发送时延
 REFERENCE_SEND_DELAY = (REFERENCE_PACKET_SIZE * 8) / Send_speed
 BG_TRAFFIC_ENABLED = True  # 背景包模拟开关，默认开启
 
