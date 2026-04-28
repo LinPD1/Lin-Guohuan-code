@@ -57,7 +57,6 @@ class Packet:
         self.source = source  # 数据包的起点（固定为R1）
         self.destination = destination  # 数据包的终点（固定为R11）
         self.path = []  # 记录数据包经过的路由器，初始为空列表
-
         self.data_bits = data_bits  # 数据部分（bit），外部传入
         self.data_bytes = data_bits / 8  # 转为字节
         udp_header = 8
@@ -66,15 +65,14 @@ class Packet:
         headers_total = udp_header + ip_header + ethernet_header
         raw_size = headers_total + self.data_bytes
         MIN_FRAME = 64  # 最小帧长
-        MAX_FRAME = 1518  # MTU
-
-        if raw_size < MIN_FRAME:
+        MAX_FRAME = 1518
+        if raw_size < MIN_FRAME:  # 数据部分封装后小于64字节则默认数据包为64字节
             self.total_bytes = MIN_FRAME
         elif raw_size > MAX_FRAME:
             self.total_bytes = MAX_FRAME
         else:
             self.total_bytes = raw_size
-        self.send_delay = (self.total_bytes * 8) / Send_speed
+        self.send_delay = (self.total_bytes * 8) / Send_speed  # 通过计算得到发送时延
 #路由器类
 class Router:
     def __init__(self, name):
@@ -86,8 +84,6 @@ class Router:
         lon, lat = CITY_COORDS[city]  # 获取经纬度
         self.lon = lon  # 经度
         self.lat = lat  # 纬度
-
-
 
     def get_queue_delay(self):
         """排队时延 = 背景包总比特数 / 带宽
@@ -181,7 +177,7 @@ def find_best_path(topology, routers, start='R1', end='R11'):
         total_delay = nx.dijkstra_path_length(G, start, end, weight='weight')  # 计算这条从R1到R11的路径的边的权重（总时延）
         return path, total_delay  # 返回选出的时延最小路径和该路径总时延
     except:
-        return None, None
+        return None, None  # 没有可用路经则返回None
 
 
 def clear_all_real_queues(routers):
@@ -207,15 +203,15 @@ def add_random_background_traffic(routers):
         if not routers[name].is_fault and name != 'R11':
             no_fault_routers.append(name)
 
-    selected_routers = random.sample(no_fault_routers, 5)  # 随机抽取5个不重复的路由器
+    selected_routers = random.sample(no_fault_routers, 5)  # 随机抽取5个不重复的无故障路由器
     """给选中的路由器添加随机数量的背景包"""
-    print(f"\n 随机给路由器加入5-10个背景包:")
+    print(f"\n 随机给路由器加入50-100个背景包:")
     for r in selected_routers:
-        num_packets = random.randint(5, 10)
-        packet_size = random.randint(64, 1518)
-        routers[r].add_background_packets(num_packets, packet_size)
-        queue_delay = routers[r].get_queue_delay()
-        city_name = ROUTER_TO_CITY[r]
+        num_packets = random.randint(50,100)  # 随机生成背景包数量（50~100个）
+        packet_size = random.randint(64, 1518)  # 随机生成每个背景包的大小（64~1518字节）
+        routers[r].add_background_packets(num_packets, packet_size)  # 将背景包字节数累加到该路由器
+        queue_delay = routers[r].get_queue_delay()  # 计算该路由器当前的排队时延
+        city_name = ROUTER_TO_CITY[r]  # 获取路由器对应的城市名称
         print(f"   ∆ {r}({city_name}) 新增 {num_packets} 个包(大小:{packet_size}B)，排队时延={queue_delay * 1000:.4f}ms")
 
 
